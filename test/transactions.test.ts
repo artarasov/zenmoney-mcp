@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { Tag, ZenMoneyAPI } from "../src/api.js";
+import type { DiffResponse, Tag, ZenMoneyAPI } from "../src/api.js";
 import { ZenState } from "../src/state.js";
 import { registerTransactionTools } from "../src/tools/transactions.js";
 import {
@@ -38,12 +38,12 @@ async function setup(opts?: {
   state = new ZenState(api);
   if (opts?.synced !== false) {
     await state.sync();
-    // Reset mock so tool calls are tracked separately
+    // Reset mock so tool calls are tracked separately. A write is answered
+    // with what changed since the last sync, which here is nothing.
     vi.mocked(api.diff).mockClear();
-    vi.mocked(api.diff).mockResolvedValue({
-      ...diffResp,
-      serverTimestamp: diffResp.serverTimestamp + 1,
-    });
+    vi.mocked(api.diff).mockResolvedValue(
+      emptyDiff(diffResp.serverTimestamp + 1)
+    );
   }
 
   server = new McpServer({ name: "test", version: "1.0.0" });
@@ -53,6 +53,20 @@ async function setup(opts?: {
   const [ct, st] = InMemoryTransport.createLinkedPair();
   await server.connect(st);
   await client.connect(ct);
+}
+
+function emptyDiff(serverTimestamp: number) {
+  return makeDiffResponse({
+    serverTimestamp,
+    instrument: [],
+    company: [],
+    user: [],
+    account: [],
+    tag: [],
+    merchant: [],
+    transaction: [],
+    deletion: [],
+  });
 }
 
 async function callTool(name: string, args: Record<string, unknown>) {
@@ -1120,5 +1134,120 @@ describe("update_transaction", () => {
     expect(result.isError).toBe(true);
     expect(getTextContent(result)).toContain("network down");
     expect(state.findTransaction("tx-expense")!.tag).toEqual(["tag-food"]);
+  });
+});
+
+describe("delete_transaction", () => {
+  const EXPENSE = makeTransaction({
+    id: "tx-expense",
+    outcome: 50,
+    outcomeAccount: "acc-checking",
+    incomeAccount: "acc-checking",
+    date: "2026-03-20",
+  });
+
+  const INCOME = makeTransaction({
+    id: "tx-income",
+    outcome: 0,
+    income: 3000,
+    outcomeAccount: "acc-checking",
+    incomeAccount: "acc-checking",
+    date: "2026-03-01",
+  });
+
+  function sentDeletion() {
+    const call = vi.mocked(api.diff).mock.calls.at(-1)![0] as any;
+    return call.deletion;
+  }
+
+  it("should send a deletion and drop the transaction locally", async () => {
+    await setup({ transactions: [EXPENSE, INCOME] });
+
+    const result = await callTool("delete_transaction", { id: "tx-expense", confirm: true });
+
+    const text = getTextContent(result);
+    expect(result.isError).toBeFalsy();
+    expect(text).toContain("Transaction deleted");
+    expect(text).toContain("id: tx-expense");
+    expect(text).toContain("cannot be undone");
+    expect(sentDeletion()).toEqual([
+      { id: "tx-expense", object: "transaction", stamp: expect.any(Number), user: 1 },
+    ]);
+    expect(vi.mocked(api.diff).mock.calls.at(-1)![0]).not.toHaveProperty("transaction");
+    expect(state.findTransaction("tx-expense")).toBeUndefined();
+    expect(state.findTransaction("tx-income")).toBeDefined();
+    expect(state.serverTimestamp).toBe(1700000001);
+  });
+
+  it("should apply the rest of the server's response", async () => {
+    await setup({ transactions: [EXPENSE] });
+    vi.mocked(api.diff).mockResolvedValueOnce({
+      ...emptyDiff(1700000005),
+      account: [{ ...CHECKING, balance: 1050 }],
+    });
+
+    await callTool("delete_transaction", { id: "tx-expense", confirm: true });
+
+    expect(state.serverTimestamp).toBe(1700000005);
+    expect(state.accounts.find((a) => a.id === "acc-checking")?.balance).toBe(1050);
+  });
+
+  it("should delete several transactions in one request", async () => {
+    await setup({ transactions: [EXPENSE, INCOME] });
+
+    const result = await callTool("delete_transaction", {
+      id: ["tx-expense", "tx-income", "tx-expense"],
+      confirm: true,
+    });
+
+    expect(getTextContent(result)).toContain("2 transactions deleted");
+    expect(api.diff).toHaveBeenCalledTimes(1);
+    expect(sentDeletion().map((d: any) => d.id)).toEqual(["tx-expense", "tx-income"]);
+    expect(state.transactions).toHaveLength(0);
+  });
+
+  it("should refuse without confirm: true", async () => {
+    await setup({ transactions: [EXPENSE] });
+
+    const result = await callTool("delete_transaction", { id: "tx-expense", confirm: false });
+
+    expect(result.isError).toBe(true);
+    expect(getTextContent(result)).toContain("confirm: true");
+    expect(api.diff).not.toHaveBeenCalled();
+    expect(state.findTransaction("tx-expense")).toBeDefined();
+  });
+
+  it("should delete nothing when any id is unknown", async () => {
+    await setup({ transactions: [EXPENSE] });
+
+    const result = await callTool("delete_transaction", {
+      id: ["tx-expense", "tx-nope"],
+      confirm: true,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(getTextContent(result)).toContain("tx-nope");
+    expect(api.diff).not.toHaveBeenCalled();
+    expect(state.findTransaction("tx-expense")).toBeDefined();
+  });
+
+  it("should keep the transaction locally when the API fails", async () => {
+    await setup({ transactions: [EXPENSE] });
+    vi.mocked(api.diff).mockRejectedValue(new Error("Network error"));
+
+    const result = await callTool("delete_transaction", { id: "tx-expense", confirm: true });
+
+    expect(result.isError).toBe(true);
+    expect(getTextContent(result)).toContain("Network error");
+    expect(state.findTransaction("tx-expense")).toBeDefined();
+  });
+
+  it("should error when not synced", async () => {
+    await setup({ synced: false });
+
+    const result = await callTool("delete_transaction", { id: "tx-expense", confirm: true });
+
+    expect(result.isError).toBe(true);
+    expect(getTextContent(result)).toContain("not synced");
   });
 });

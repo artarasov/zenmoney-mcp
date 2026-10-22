@@ -15,6 +15,7 @@ MCP server for [ZenMoney](https://zenmoney.ru) — access your personal finance 
 | `add_income` | Add an income transaction |
 | `add_transfer` | Transfer money between accounts (including cross-currency) |
 | `update_transaction` | Change an existing transaction — category, amount, date, payee, comment, account |
+| `delete_transaction` | Delete one or more transactions by id (cannot be undone, requires `confirm: true`) |
 | `suggest_category` | Get auto-suggested category for a payee |
 
 ## Prerequisites
@@ -102,9 +103,9 @@ Once configured, start a conversation and ask your AI client to:
 3. **Query** — "Show expenses for the last 7 days", "List transactions from January 1–31", "How much did I spend on groceries?"
 4. **Add transactions** — "Add a 500 RUB expense for coffee today"
 5. **Transfer** — "Transfer 1000 USD from Checking to Euro Card, received 920 EUR"
-6. **Fix mistakes** — "Recategorize yesterday's Amazon expense to Household", "Change the comment on that 500 RUB coffee"
+6. **Fix mistakes** — "Recategorize yesterday's Amazon expense to Household", "Change the comment on that 500 RUB coffee", "Delete the duplicate taxi ride from Monday"
 
-`list_transactions` prints each transaction's id, and `update_transaction` takes one id or a list of them — so a whole batch can be recategorized in a single call.
+`list_transactions` prints each transaction's id, and `update_transaction` and `delete_transaction` take one id or a list of them — so a whole batch can be recategorized or removed in a single call. ZenMoney does not restore deleted transactions, so a deleted one can only be added back as a new transaction.
 
 ## Contributing
 

@@ -820,6 +820,93 @@ export function registerTransactionTools(
       }
     }
   );
+
+  server.tool(
+    "delete_transaction",
+    "Delete one or more transactions by id. This cannot be undone: ZenMoney does not let a deleted transaction be restored, so putting an operation back means adding it again as a new transaction. Ids come from list_transactions. Sync must be done first.",
+    {
+      id: z
+        .union([z.string(), z.array(z.string())])
+        .describe("Transaction UUID, or a list of UUIDs to delete together"),
+      confirm: z
+        .boolean()
+        .describe(
+          "Must be true. A guard against deleting on a guessed or mistyped id."
+        ),
+    },
+    async ({ id, confirm }) => {
+      if (!state.isSynced) {
+        return toolError("Data not synced yet. Please run sync_data first.");
+      }
+
+      if (confirm !== true) {
+        return toolError(
+          "Refusing to delete without confirm: true. Deleting cannot be undone."
+        );
+      }
+
+      const ids = Array.from(
+        new Set((Array.isArray(id) ? id : [id]).map((v) => v.trim()))
+      ).filter((v) => v !== "");
+      if (ids.length === 0) {
+        return toolError("No transaction id given.");
+      }
+
+      const user = state.getUser();
+      if (!user) {
+        return toolError("User not found. Run sync_data first.");
+      }
+
+      const doomed: Transaction[] = [];
+      const missing: string[] = [];
+      for (const txId of ids) {
+        const tx = state.findTransaction(txId);
+        if (tx) doomed.push(tx);
+        else missing.push(txId);
+      }
+      if (missing.length > 0) {
+        return toolError(
+          `Transaction${missing.length > 1 ? "s" : ""} not found: ${missing.join(", ")}. Nothing was deleted. Use list_transactions to find ids, or run sync_data if the transaction was added elsewhere.`
+        );
+      }
+
+      const now = Math.floor(Date.now() / 1000);
+
+      try {
+        const resp = await api.diff({
+          currentClientTimestamp: now,
+          serverTimestamp: state.serverTimestamp,
+          deletion: doomed.map((tx) => ({
+            id: tx.id,
+            object: "transaction",
+            stamp: now,
+            user: user.id,
+          })),
+        });
+
+        // Our deletion first, then the response, which carries what else
+        // changed on the server (the recomputed balances among it)
+        state.transactions = state.transactions.filter(
+          (t) => !ids.includes(t.id)
+        );
+        state.applyDiff(resp);
+
+        const lines = doomed.map((tx) => `- ${formatTransactionLine(state, tx)}`);
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `${doomed.length === 1 ? "Transaction deleted" : `${doomed.length} transactions deleted`}:\n\n${lines.join("\n")}\n\nThis cannot be undone. To put an operation back, add it again as a new transaction.`,
+            },
+          ],
+        };
+      } catch (error) {
+        return toolError(
+          `Failed to delete transaction${doomed.length > 1 ? "s" : ""}: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+  );
 }
 
 function resolveAccount(state: ZenState, nameOrId: string) {
