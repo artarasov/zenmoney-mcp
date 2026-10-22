@@ -433,6 +433,8 @@ export function registerTransactionTools(
     {
       days: z
         .number()
+        .int()
+        .nonnegative()
         .optional()
         .default(30)
         .describe("Number of days to look back from today (default 30). Ignored if start_date or end_date is provided."),
@@ -474,11 +476,11 @@ export function registerTransactionTools(
       }
 
       let lowerBound: string;
-      let upperBound: string | null;
+      let upperBound: string;
 
       if (start_date || end_date) {
         lowerBound = start_date ?? "0000-01-01";
-        upperBound = end_date ?? new Date().toISOString().slice(0, 10);
+        upperBound = end_date ?? localDate(new Date());
         if (start_date && end_date && start_date > end_date) {
           return {
             content: [
@@ -493,12 +495,12 @@ export function registerTransactionTools(
       } else {
         const cutoff = new Date();
         cutoff.setDate(cutoff.getDate() - days);
-        lowerBound = cutoff.toISOString().slice(0, 10);
-        upperBound = null;
+        lowerBound = localDate(cutoff);
+        upperBound = localDate(new Date());
       }
 
       let filtered = state.transactions.filter(
-        (t) => t.date >= lowerBound && (upperBound === null || t.date <= upperBound)
+        (t) => t.date >= lowerBound && t.date <= upperBound
       );
 
       if (account) {
@@ -834,6 +836,18 @@ function resolveTag(state: ZenState, nameOrId: string): string[] | null {
   const byName = state.findTagByName(nameOrId);
   if (byName) return [byName.id];
   return null;
+}
+
+/**
+ * YYYY-MM-DD of the given moment in this machine's timezone. Transaction
+ * dates are calendar days as the user sees them, while toISOString() gives the
+ * UTC day, which east of Greenwich is still yesterday for the first hours
+ * after midnight.
+ */
+function localDate(d: Date): string {
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${month}-${day}`;
 }
 
 function accountNotFound(nameOrId: string): string {

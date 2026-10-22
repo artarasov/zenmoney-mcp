@@ -709,12 +709,72 @@ describe("list_transactions", () => {
     expect(getTextContent(result)).toContain("must be on or before");
   });
 
+  it("should reject a negative or fractional days value", async () => {
+    await setup({ transactions: [] });
+    for (const days of [-5, 1.5]) {
+      const result = await callTool("list_transactions", { days });
+      expect(result.isError).toBe(true);
+    }
+  });
+
   it("should reject malformed date strings", async () => {
     await setup({ transactions: [] });
     const result = await callTool("list_transactions", {
       start_date: "01/15/2026",
     });
     expect(result.isError).toBe(true);
+  });
+
+  describe("day boundaries in the local timezone", () => {
+    const originalTz = process.env.TZ;
+
+    beforeEach(() => {
+      // 01:30 on March 21 in Moscow is still March 20 in UTC
+      process.env.TZ = "Europe/Moscow";
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-03-20T22:30:00Z"));
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      process.env.TZ = originalTz;
+    });
+
+    it("should include today's transactions when only start_date is given", async () => {
+      await setup({
+        transactions: [makeTransaction({ id: "tx-today", outcome: 10, date: "2026-03-21" })],
+      });
+
+      const result = await callTool("list_transactions", { start_date: "2026-03-01" });
+      expect(getTextContent(result)).toContain("tx-today");
+    });
+
+    it("should not count future-dated transactions as part of the last days", async () => {
+      await setup({
+        transactions: [
+          makeTransaction({ id: "tx-today", outcome: 10, date: "2026-03-21" }),
+          makeTransaction({ id: "tx-tomorrow", outcome: 20, date: "2026-03-22" }),
+        ],
+      });
+
+      const text = getTextContent(await callTool("list_transactions", { days: 30 }));
+      expect(text).toContain("tx-today");
+      expect(text).not.toContain("tx-tomorrow");
+    });
+
+    it("should count days back from the local date", async () => {
+      await setup({
+        transactions: [
+          makeTransaction({ id: "tx-edge", outcome: 10, date: "2026-03-20" }),
+          makeTransaction({ id: "tx-outside", outcome: 20, date: "2026-03-19" }),
+        ],
+      });
+
+      const result = await callTool("list_transactions", { days: 1 });
+      const text = getTextContent(result);
+      expect(text).toContain("tx-edge");
+      expect(text).not.toContain("tx-outside");
+    });
   });
 });
 
