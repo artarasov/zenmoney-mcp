@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { Tag, ZenMoneyAPI } from "../src/api.js";
+import type { Account, Tag, ZenMoneyAPI } from "../src/api.js";
 import { ZenState } from "../src/state.js";
 import { registerTransactionTools } from "../src/tools/transactions.js";
 import {
@@ -24,10 +24,12 @@ async function setup(opts?: {
   synced?: boolean;
   transactions?: ReturnType<typeof makeTransaction>[];
   tags?: Tag[];
+  accounts?: Account[];
 }) {
   const diffResp = makeDiffResponse({
     transaction: opts?.transactions ?? [],
     ...(opts?.tags ? { tag: opts.tags } : {}),
+    ...(opts?.accounts ? { account: opts.accounts } : {}),
   });
 
   api = {
@@ -1120,5 +1122,161 @@ describe("update_transaction", () => {
     expect(result.isError).toBe(true);
     expect(getTextContent(result)).toContain("network down");
     expect(state.findTransaction("tx-expense")!.tag).toEqual(["tag-food"]);
+  });
+});
+
+describe("name resolution", () => {
+  const SAVINGS_GOAL: Account = { ...SAVINGS, id: "acc-savings-goal", title: "Savings Goal" };
+  const JOINT_SAVINGS: Account = { ...SAVINGS, id: "acc-joint-savings", title: "Joint Savings" };
+  const OLD_SAVINGS: Account = { ...SAVINGS, id: "acc-old-savings", archive: true };
+
+  const SPENDING = makeTransaction({
+    id: "tx-spending",
+    outcome: 50,
+    outcomeAccount: "acc-checking",
+    incomeAccount: "acc-checking",
+    tag: ["tag-food"],
+    date: "2026-03-20",
+  });
+
+  function sentTransaction() {
+    const call = vi.mocked(api.diff).mock.calls.at(-1)![0] as any;
+    return call.transaction[0];
+  }
+
+  it("should prefer an exact account title over a substring match", async () => {
+    // "Savings Goal" comes first, so a first-substring-hit lookup picks it
+    await setup({ accounts: [CHECKING, SAVINGS_GOAL, SAVINGS] });
+
+    await callTool("add_expense", { account: "savings", amount: 10, date: "2026-03-20" });
+
+    expect(sentTransaction().outcomeAccount).toBe("acc-savings");
+  });
+
+  it("should reject an ambiguous account name instead of guessing", async () => {
+    await setup({ accounts: [CHECKING, SAVINGS_GOAL, JOINT_SAVINGS] });
+
+    const result = await callTool("add_expense", { account: "Saving", amount: 10, date: "2026-03-20" });
+
+    const text = getTextContent(result);
+    expect(result.isError).toBe(true);
+    expect(text).toContain("ambiguous");
+    expect(text).toContain("Savings Goal (acc-savings-goal)");
+    expect(text).toContain("Joint Savings (acc-joint-savings)");
+    expect(api.diff).not.toHaveBeenCalled();
+  });
+
+  it("should prefer an active account over an archived one with the same title", async () => {
+    await setup({ accounts: [CHECKING, OLD_SAVINGS, SAVINGS] });
+
+    await callTool("add_income", { account: "Savings", amount: 10, date: "2026-03-20" });
+
+    expect(sentTransaction().incomeAccount).toBe("acc-savings");
+  });
+
+  it("should reject an ambiguous transfer destination", async () => {
+    await setup({ accounts: [CHECKING, SAVINGS_GOAL, JOINT_SAVINGS] });
+
+    const result = await callTool("add_transfer", {
+      from_account: "Checking",
+      to_account: "Saving",
+      amount: 10,
+      date: "2026-03-20",
+    });
+
+    expect(result.isError).toBe(true);
+    expect(getTextContent(result)).toContain('Destination account "Saving" is ambiguous');
+    expect(api.diff).not.toHaveBeenCalled();
+  });
+
+  it("should reject an ambiguous account when moving a transaction", async () => {
+    await setup({ transactions: [SPENDING], accounts: [CHECKING, SAVINGS_GOAL, JOINT_SAVINGS] });
+
+    const result = await callTool("update_transaction", { id: "tx-spending", account: "Saving" });
+
+    expect(result.isError).toBe(true);
+    expect(getTextContent(result)).toContain("ambiguous");
+    expect(api.diff).not.toHaveBeenCalled();
+  });
+
+  it.each(["add_expense", "add_income"])(
+    "%s should error on an unknown category instead of saving it uncategorized",
+    async (tool) => {
+      await setup();
+
+      const result = await callTool(tool, {
+        account: "Checking",
+        amount: 10,
+        date: "2026-03-20",
+        category: "Bicycles",
+      });
+
+      expect(result.isError).toBe(true);
+      expect(getTextContent(result)).toContain('Category "Bicycles" not found');
+      expect(api.diff).not.toHaveBeenCalled();
+    }
+  );
+
+  it("should reject an ambiguous category when adding", async () => {
+    await setup();
+
+    const result = await callTool("add_expense", {
+      account: "Checking",
+      amount: 10,
+      date: "2026-03-20",
+      category: "a",
+    });
+
+    expect(result.isError).toBe(true);
+    expect(getTextContent(result)).toContain("ambiguous");
+    expect(api.diff).not.toHaveBeenCalled();
+  });
+
+  it("should error on an unknown account filter instead of listing everything", async () => {
+    await setup({ transactions: [SPENDING] });
+
+    const result = await callTool("list_transactions", {
+      start_date: "2026-03-01",
+      end_date: "2026-03-31",
+      account: "Brokerage",
+    });
+
+    expect(result.isError).toBe(true);
+    expect(getTextContent(result)).toContain('Account "Brokerage" not found');
+  });
+
+  it("should error on an unknown category filter", async () => {
+    await setup({ transactions: [SPENDING] });
+
+    const result = await callTool("list_transactions", {
+      start_date: "2026-03-01",
+      end_date: "2026-03-31",
+      category: "Bicycles",
+    });
+
+    expect(result.isError).toBe(true);
+    expect(getTextContent(result)).toContain('Category "Bicycles" not found');
+  });
+
+  it("should filter by the exactly named category, not the first substring hit", async () => {
+    const CAR: Tag = { ...FOOD, id: "tag-car", title: "Car" };
+    const CARSHARING: Tag = { ...FOOD, id: "tag-carsharing", title: "Carsharing" };
+    await setup({
+      tags: [CARSHARING, CAR],
+      transactions: [
+        makeTransaction({ id: "tx-car", outcome: 10, tag: ["tag-car"], date: "2026-03-20" }),
+        makeTransaction({ id: "tx-share", outcome: 20, tag: ["tag-carsharing"], date: "2026-03-20" }),
+      ],
+    });
+
+    const result = await callTool("list_transactions", {
+      start_date: "2026-03-01",
+      end_date: "2026-03-31",
+      category: "Car",
+    });
+
+    const text = getTextContent(result);
+    expect(text).toContain("tx-car");
+    expect(text).not.toContain("tx-share");
   });
 });

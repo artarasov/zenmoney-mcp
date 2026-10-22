@@ -40,18 +40,9 @@ export function registerTransactionTools(
         };
       }
 
-      const acc = resolveAccount(state, account);
-      if (!acc) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Account "${account}" not found. Use list_accounts to see available accounts.`,
-            },
-          ],
-          isError: true,
-        };
-      }
+      const accMatch = resolveAccountStrict(state, account);
+      if ("error" in accMatch) return toolError(accMatch.error);
+      const acc = accMatch.account;
 
       const instrumentId = acc.instrument ?? state.getUser()?.currency ?? 1;
       const user = state.getUser();
@@ -64,7 +55,12 @@ export function registerTransactionTools(
         };
       }
 
-      const tagIds = category ? resolveTag(state, category) : null;
+      let tagIds: string[] | null = null;
+      if (category) {
+        const match = resolveTagStrict(state, category);
+        if ("error" in match) return toolError(match.error);
+        tagIds = [match.tag.id];
+      }
       const now = Math.floor(Date.now() / 1000);
 
       const transaction = {
@@ -164,18 +160,9 @@ export function registerTransactionTools(
         };
       }
 
-      const acc = resolveAccount(state, account);
-      if (!acc) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Account "${account}" not found. Use list_accounts to see available accounts.`,
-            },
-          ],
-          isError: true,
-        };
-      }
+      const accMatch = resolveAccountStrict(state, account);
+      if ("error" in accMatch) return toolError(accMatch.error);
+      const acc = accMatch.account;
 
       const instrumentId = acc.instrument ?? state.getUser()?.currency ?? 1;
       const user = state.getUser();
@@ -188,7 +175,12 @@ export function registerTransactionTools(
         };
       }
 
-      const tagIds = category ? resolveTag(state, category) : null;
+      let tagIds: string[] | null = null;
+      if (category) {
+        const match = resolveTagStrict(state, category);
+        if ("error" in match) return toolError(match.error);
+        tagIds = [match.tag.id];
+      }
       const now = Math.floor(Date.now() / 1000);
 
       const transaction = {
@@ -284,31 +276,13 @@ export function registerTransactionTools(
         };
       }
 
-      const fromAcc = resolveAccount(state, from_account);
-      const toAcc = resolveAccount(state, to_account);
+      const fromMatch = resolveAccountStrict(state, from_account, "Source account");
+      if ("error" in fromMatch) return toolError(fromMatch.error);
+      const fromAcc = fromMatch.account;
 
-      if (!fromAcc) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Source account "${from_account}" not found.`,
-            },
-          ],
-          isError: true,
-        };
-      }
-      if (!toAcc) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Destination account "${to_account}" not found.`,
-            },
-          ],
-          isError: true,
-        };
-      }
+      const toMatch = resolveAccountStrict(state, to_account, "Destination account");
+      if ("error" in toMatch) return toolError(toMatch.error);
+      const toAcc = toMatch.account;
 
       const user = state.getUser();
       if (!user) {
@@ -502,18 +476,18 @@ export function registerTransactionTools(
       );
 
       if (account) {
-        const acc = resolveAccount(state, account);
-        if (acc) {
-          filtered = filtered.filter(
-            (t) =>
-              t.incomeAccount === acc.id || t.outcomeAccount === acc.id
-          );
-        }
+        const match = resolveAccountStrict(state, account);
+        if ("error" in match) return toolError(match.error);
+        const accId = match.account.id;
+        filtered = filtered.filter(
+          (t) => t.incomeAccount === accId || t.outcomeAccount === accId
+        );
       }
 
       if (category) {
-        const tag = state.findTagByName(category);
-        const tagId = tag?.id ?? category;
+        const match = resolveTagStrict(state, category);
+        if ("error" in match) return toolError(match.error);
+        const tagId = match.tag.id;
         filtered = filtered.filter(
           (t) => t.tag && t.tag.includes(tagId)
         );
@@ -682,23 +656,23 @@ export function registerTransactionTools(
 
       let bothAccount: Account | undefined;
       if (account !== undefined) {
-        const acc = resolveAccount(state, account);
-        if (!acc) return toolError(accountNotFound(account));
-        bothAccount = acc;
+        const match = resolveAccountStrict(state, account);
+        if ("error" in match) return toolError(match.error);
+        bothAccount = match.account;
       }
 
       let sourceAccount: Account | undefined;
       if (from_account !== undefined) {
-        const acc = resolveAccount(state, from_account);
-        if (!acc) return toolError(accountNotFound(from_account));
-        sourceAccount = acc;
+        const match = resolveAccountStrict(state, from_account, "Source account");
+        if ("error" in match) return toolError(match.error);
+        sourceAccount = match.account;
       }
 
       let targetAccount: Account | undefined;
       if (to_account !== undefined) {
-        const acc = resolveAccount(state, to_account);
-        if (!acc) return toolError(accountNotFound(to_account));
-        targetAccount = acc;
+        const match = resolveAccountStrict(state, to_account, "Destination account");
+        if ("error" in match) return toolError(match.error);
+        targetAccount = match.account;
       }
 
       const originals: Transaction[] = [];
@@ -822,24 +796,6 @@ export function registerTransactionTools(
   );
 }
 
-function resolveAccount(state: ZenState, nameOrId: string) {
-  const direct = state.accounts.find((a) => a.id === nameOrId);
-  if (direct) return direct;
-  return state.findAccountByName(nameOrId);
-}
-
-function resolveTag(state: ZenState, nameOrId: string): string[] | null {
-  const direct = state.tags.find((t) => t.id === nameOrId);
-  if (direct) return [direct.id];
-  const byName = state.findTagByName(nameOrId);
-  if (byName) return [byName.id];
-  return null;
-}
-
-function accountNotFound(nameOrId: string): string {
-  return `Account "${nameOrId}" not found. Use list_accounts to see available accounts.`;
-}
-
 function toolError(text: string) {
   return {
     content: [{ type: "text" as const, text }],
@@ -848,36 +804,77 @@ function toolError(text: string) {
 }
 
 /**
- * Stricter than findTagByName: an exact title wins over a substring match, and
- * an ambiguous name is reported instead of silently resolving to the first hit.
- * Picking the wrong category matters more when overwriting an existing one.
+ * Resolve a name or id to exactly one entity. An id or an exact title (case
+ * insensitive) wins over a substring match, and an ambiguous name is reported
+ * instead of silently resolving to whichever entity happens to come first:
+ * with two accounts called "Mortgage", the first-hit lookup could put money
+ * on either. `preferred` breaks a tie when exactly one candidate passes it.
  */
+function resolveStrict<T extends { id: string; title: string }>(
+  items: T[],
+  nameOrId: string,
+  preferred?: (item: T) => boolean
+): { match: T } | { candidates: T[] } {
+  const byId = items.find((i) => i.id === nameOrId);
+  if (byId) return { match: byId };
+
+  const lower = nameOrId.trim().toLowerCase();
+  if (lower === "") return { candidates: [] };
+
+  const pick = (matches: T[]): { match: T } | { candidates: T[] } => {
+    if (matches.length === 1) return { match: matches[0] };
+    const liked = preferred ? matches.filter(preferred) : [];
+    if (liked.length === 1) return { match: liked[0] };
+    return { candidates: matches };
+  };
+
+  const exact = items.filter((i) => i.title.toLowerCase() === lower);
+  if (exact.length > 0) return pick(exact);
+
+  const partial = items.filter((i) => i.title.toLowerCase().includes(lower));
+  if (partial.length > 0) return pick(partial);
+
+  return { candidates: [] };
+}
+
 function resolveTagStrict(
   state: ZenState,
   nameOrId: string
 ): { tag: Tag } | { error: string } {
-  const byId = state.tags.find((t) => t.id === nameOrId);
-  if (byId) return { tag: byId };
-
-  const lower = nameOrId.trim().toLowerCase();
-  const exact = state.tags.filter((t) => t.title.toLowerCase() === lower);
-  if (exact.length === 1) return { tag: exact[0] };
-  if (exact.length > 1) return { error: ambiguousTag(nameOrId, exact) };
-
-  const partial = state.tags.filter((t) =>
-    t.title.toLowerCase().includes(lower)
-  );
-  if (partial.length === 1) return { tag: partial[0] };
-  if (partial.length > 1) return { error: ambiguousTag(nameOrId, partial) };
-
+  const r = resolveStrict(state.tags, nameOrId);
+  if ("match" in r) return { tag: r.match };
+  if (r.candidates.length > 0) {
+    return { error: ambiguous("Category", nameOrId, r.candidates, "category id") };
+  }
   return {
     error: `Category "${nameOrId}" not found. Use list_categories to see available categories.`,
   };
 }
 
-function ambiguousTag(input: string, matches: Tag[]): string {
-  const list = matches.map((t) => `${t.title} (${t.id})`).join(", ");
-  return `Category "${input}" is ambiguous — it matches: ${list}. Use the exact title or the category id.`;
+/** Like resolveTagStrict; an archived account loses a tie to an active one. */
+function resolveAccountStrict(
+  state: ZenState,
+  nameOrId: string,
+  label = "Account"
+): { account: Account } | { error: string } {
+  const r = resolveStrict(state.accounts, nameOrId, (a) => !a.archive);
+  if ("match" in r) return { account: r.match };
+  if (r.candidates.length > 0) {
+    return { error: ambiguous(label, nameOrId, r.candidates, "account id") };
+  }
+  return {
+    error: `${label} "${nameOrId}" not found. Use list_accounts to see available accounts.`,
+  };
+}
+
+function ambiguous(
+  label: string,
+  input: string,
+  matches: { id: string; title: string }[],
+  idName: string
+): string {
+  const list = matches.map((m) => `${m.title} (${m.id})`).join(", ");
+  return `${label} "${input}" is ambiguous — it matches: ${list}. Use the exact title or the ${idName}.`;
 }
 
 function tagTitles(state: ZenState, ids: string[] | null): string {
