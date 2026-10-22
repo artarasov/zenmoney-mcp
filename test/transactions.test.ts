@@ -255,6 +255,19 @@ describe("add_income", () => {
 describe("add_transfer", () => {
   beforeEach(() => setup());
 
+  it("should reject a transfer to the same account", async () => {
+    const result = await callTool("add_transfer", {
+      from_account: "Checking",
+      to_account: "acc-checking",
+      amount: 10,
+      date: "2026-03-20",
+    });
+
+    expect(result.isError).toBe(true);
+    expect(getTextContent(result)).toContain("same account");
+    expect(api.diff).not.toHaveBeenCalled();
+  });
+
   it("should create a same-currency transfer", async () => {
     const result = await callTool("add_transfer", {
       from_account: "Checking",
@@ -926,6 +939,20 @@ describe("update_transaction", () => {
 
     expect(result.isError).toBe(true);
     expect(getTextContent(result)).toContain("outcome_amount");
+    expect(api.diff).not.toHaveBeenCalled();
+  });
+
+  it("should reject moving both sides of a transfer to the same account", async () => {
+    await setup({ transactions: [TRANSFER] });
+
+    // TRANSFER goes Checking -> Savings
+    const result = await callTool("update_transaction", {
+      id: "tx-transfer",
+      to_account: "Checking",
+    });
+
+    expect(result.isError).toBe(true);
+    expect(getTextContent(result)).toContain("cannot be the same account");
     expect(api.diff).not.toHaveBeenCalled();
   });
 
