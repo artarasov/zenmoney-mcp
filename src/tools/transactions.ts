@@ -101,14 +101,9 @@ export function registerTransactionTools(
       };
 
       try {
-        const resp = await api.diff({
-          currentClientTimestamp: now,
-          serverTimestamp: state.serverTimestamp,
-          transaction: [transaction],
-        });
-
-        state.serverTimestamp = resp.serverTimestamp;
-        state.transactions.push(transaction);
+        await state.write({ transaction: [transaction] }, () =>
+          state.upsertTransaction(transaction)
+        );
 
         const instr = state.getInstrument(instrumentId);
         const currency = instr?.shortTitle ?? "";
@@ -122,7 +117,7 @@ export function registerTransactionTools(
           content: [
             {
               type: "text" as const,
-              text: `Expense added:\n- Amount: ${amount} ${currency}\n- Account: ${acc.title}\n- Date: ${date}\n- Category: ${catName}${payee ? `\n- Payee: ${payee}` : ""}${comment ? `\n- Comment: ${comment}` : ""}\n- ID: ${transaction.id}`,
+              text: `Expense added:\n- Amount: ${amount} ${currency}\n- Account: ${acc.title}\n- Date: ${date}\n- Category: ${catName}${payee ? `\n- Payee: ${payee}` : ""}${comment ? `\n- Comment: ${comment}` : ""}\n- ID: ${transaction.id}${serverVersionWarning(state, transaction)}`,
             },
           ],
         };
@@ -225,14 +220,9 @@ export function registerTransactionTools(
       };
 
       try {
-        const resp = await api.diff({
-          currentClientTimestamp: now,
-          serverTimestamp: state.serverTimestamp,
-          transaction: [transaction],
-        });
-
-        state.serverTimestamp = resp.serverTimestamp;
-        state.transactions.push(transaction);
+        await state.write({ transaction: [transaction] }, () =>
+          state.upsertTransaction(transaction)
+        );
 
         const instr = state.getInstrument(instrumentId);
         const currency = instr?.shortTitle ?? "";
@@ -241,7 +231,7 @@ export function registerTransactionTools(
           content: [
             {
               type: "text" as const,
-              text: `Income added:\n- Amount: ${amount} ${currency}\n- Account: ${acc.title}\n- Date: ${date}\n- ID: ${transaction.id}`,
+              text: `Income added:\n- Amount: ${amount} ${currency}\n- Account: ${acc.title}\n- Date: ${date}\n- ID: ${transaction.id}${serverVersionWarning(state, transaction)}`,
             },
           ],
         };
@@ -390,14 +380,9 @@ export function registerTransactionTools(
       };
 
       try {
-        const resp = await api.diff({
-          currentClientTimestamp: now,
-          serverTimestamp: state.serverTimestamp,
-          transaction: [transaction],
-        });
-
-        state.serverTimestamp = resp.serverTimestamp;
-        state.transactions.push(transaction);
+        await state.write({ transaction: [transaction] }, () =>
+          state.upsertTransaction(transaction)
+        );
 
         const fromInstr = state.getInstrument(outcomeInstrument);
         const toInstr = state.getInstrument(incomeInstrument);
@@ -409,7 +394,7 @@ export function registerTransactionTools(
           content: [
             {
               type: "text" as const,
-              text: `Transfer added:\n- From: ${fromAcc.title}\n- To: ${toAcc.title}\n${amountLine}\n- Date: ${date}\n- ID: ${transaction.id}`,
+              text: `Transfer added:\n- From: ${fromAcc.title}\n- To: ${toAcc.title}\n${amountLine}\n- Date: ${date}\n- ID: ${transaction.id}${serverVersionWarning(state, transaction)}`,
             },
           ],
         };
@@ -701,108 +686,115 @@ export function registerTransactionTools(
         targetAccount = acc;
       }
 
-      const originals: Transaction[] = [];
-      const missing: string[] = [];
-      for (const txId of ids) {
-        const tx = state.findTransaction(txId);
-        if (tx) originals.push(tx);
-        else missing.push(txId);
-      }
-      if (missing.length > 0) {
-        return toolError(
-          `Transaction${missing.length > 1 ? "s" : ""} not found: ${missing.join(", ")}. Use list_transactions to find ids, or run sync_data if the transaction was added elsewhere.`
-        );
-      }
-
-      const now = Math.floor(Date.now() / 1000);
-      const updates: Transaction[] = [];
-
-      for (const tx of originals) {
-        const next: Transaction = { ...tx, changed: now };
-        const wasTransfer = tx.incomeAccount !== tx.outcomeAccount;
-
-        if (tagIds !== undefined) next.tag = tagIds;
-        if (date !== undefined) next.date = date;
-        if (comment !== undefined) next.comment = comment === "" ? null : comment;
-        if (payee !== undefined) {
-          next.payee = payee === "" ? null : payee;
-          const merchant = next.payee
-            ? state.merchants.find(
-                (m) => m.title.toLowerCase() === next.payee!.toLowerCase()
-              )
-            : undefined;
-          next.merchant = merchant?.id ?? null;
+      // Reads the transactions from state, so it runs once to validate and
+      // again at this write's turn in the queue: an exchange queued before
+      // it may have changed or deleted them in the meantime.
+      const buildUpdates = ():
+        | { originals: Transaction[]; updates: Transaction[] }
+        | string => {
+        const originals: Transaction[] = [];
+        const missing: string[] = [];
+        for (const txId of ids) {
+          const tx = state.findTransaction(txId);
+          if (tx) originals.push(tx);
+          else missing.push(txId);
+        }
+        if (missing.length > 0) {
+          return `Transaction${missing.length > 1 ? "s" : ""} not found: ${missing.join(", ")}. Use list_transactions to find ids, or run sync_data if the transaction was added elsewhere.`;
         }
 
-        if (bothAccount) {
-          if (wasTransfer) {
-            return toolError(
-              `Transaction ${tx.id} is a transfer — use from_account/to_account instead of account.`
-            );
+        const now = Math.floor(Date.now() / 1000);
+        const updates: Transaction[] = [];
+
+        for (const tx of originals) {
+          const next: Transaction = { ...tx, changed: now };
+          const wasTransfer = tx.incomeAccount !== tx.outcomeAccount;
+
+          if (tagIds !== undefined) next.tag = tagIds;
+          if (date !== undefined) next.date = date;
+          if (comment !== undefined) next.comment = comment === "" ? null : comment;
+          if (payee !== undefined) {
+            next.payee = payee === "" ? null : payee;
+            const merchant = next.payee
+              ? state.merchants.find(
+                  (m) => m.title.toLowerCase() === next.payee!.toLowerCase()
+                )
+              : undefined;
+            next.merchant = merchant?.id ?? null;
           }
-          const instrument = bothAccount.instrument ?? user.currency ?? 1;
-          next.incomeAccount = bothAccount.id;
-          next.outcomeAccount = bothAccount.id;
-          next.incomeInstrument = instrument;
-          next.outcomeInstrument = instrument;
-        }
-        if (sourceAccount) {
-          next.outcomeAccount = sourceAccount.id;
-          next.outcomeInstrument = sourceAccount.instrument ?? user.currency ?? 1;
-        }
-        if (targetAccount) {
-          next.incomeAccount = targetAccount.id;
-          next.incomeInstrument = targetAccount.instrument ?? user.currency ?? 1;
-        }
 
-        if (amount !== undefined) {
-          if (next.incomeAccount !== next.outcomeAccount) {
-            return toolError(
-              `Transaction ${tx.id} is a transfer — use outcome_amount and/or income_amount instead of amount.`
-            );
+          if (bothAccount) {
+            if (wasTransfer) {
+              return `Transaction ${tx.id} is a transfer — use from_account/to_account instead of account.`;
+            }
+            const instrument = bothAccount.instrument ?? user.currency ?? 1;
+            next.incomeAccount = bothAccount.id;
+            next.outcomeAccount = bothAccount.id;
+            next.incomeInstrument = instrument;
+            next.outcomeInstrument = instrument;
           }
-          if (tx.outcome > 0 && tx.income === 0) {
-            next.outcome = amount;
-          } else if (tx.income > 0 && tx.outcome === 0) {
-            next.income = amount;
-          } else {
-            return toolError(
-              `Cannot tell whether ${amount} is an expense or an income for transaction ${tx.id}. Pass outcome_amount or income_amount instead.`
-            );
+          if (sourceAccount) {
+            next.outcomeAccount = sourceAccount.id;
+            next.outcomeInstrument = sourceAccount.instrument ?? user.currency ?? 1;
           }
-        }
-        if (outcome_amount !== undefined) next.outcome = outcome_amount;
-        if (income_amount !== undefined) next.income = income_amount;
+          if (targetAccount) {
+            next.incomeAccount = targetAccount.id;
+            next.incomeInstrument = targetAccount.instrument ?? user.currency ?? 1;
+          }
 
-        if (
-          next.incomeAccount !== next.outcomeAccount &&
-          (next.income <= 0 || next.outcome <= 0)
-        ) {
-          return toolError(
-            `Transaction ${tx.id} would be a transfer between two accounts with a zero amount on one side. Pass both outcome_amount and income_amount.`
-          );
+          if (amount !== undefined) {
+            if (next.incomeAccount !== next.outcomeAccount) {
+              return `Transaction ${tx.id} is a transfer — use outcome_amount and/or income_amount instead of amount.`;
+            }
+            if (tx.outcome > 0 && tx.income === 0) {
+              next.outcome = amount;
+            } else if (tx.income > 0 && tx.outcome === 0) {
+              next.income = amount;
+            } else {
+              return `Cannot tell whether ${amount} is an expense or an income for transaction ${tx.id}. Pass outcome_amount or income_amount instead.`;
+            }
+          }
+          if (outcome_amount !== undefined) next.outcome = outcome_amount;
+          if (income_amount !== undefined) next.income = income_amount;
+
+          if (
+            next.incomeAccount !== next.outcomeAccount &&
+            (next.income <= 0 || next.outcome <= 0)
+          ) {
+            return `Transaction ${tx.id} would be a transfer between two accounts with a zero amount on one side. Pass both outcome_amount and income_amount.`;
+          }
+
+          updates.push(next);
         }
 
-        updates.push(next);
-      }
+        return { originals, updates };
+      };
+
+      const checked = buildUpdates();
+      if (typeof checked === "string") return toolError(checked);
+      let { originals, updates } = checked;
 
       try {
-        const resp = await api.diff({
-          currentClientTimestamp: now,
-          serverTimestamp: state.serverTimestamp,
-          transaction: updates,
-        });
-
-        state.serverTimestamp = resp.serverTimestamp;
-        for (const next of updates) state.upsertTransaction(next);
+        await state.write(
+          () => {
+            const fresh = buildUpdates();
+            if (typeof fresh === "string") throw new Error(fresh);
+            ({ originals, updates } = fresh);
+            return { transaction: updates };
+          },
+          () => {
+            for (const next of updates) state.upsertTransaction(next);
+          }
+        );
 
         const blocks = updates.map((next, i) => {
-          const changes = describeChanges(state, originals[i], next);
+          const held = state.findTransaction(next.id) ?? next;
+          const changes = describeChanges(state, originals[i], held);
           const detail =
             changes.length > 0
               ? changes.map((c) => `    ${c}`).join("\n")
               : "    (no field actually changed)";
-          return `- ${formatTransactionLine(state, next)}\n${detail}`;
+          return `- ${formatTransactionLine(state, held)}\n${detail}${serverVersionWarning(state, next, "\n    ")}`;
         });
 
         return {
@@ -929,6 +921,25 @@ function formatTransactionLine(state: ZenState, t: Transaction): string {
   return `${t.date} | ${type.padEnd(8)} | ${amountStr.padEnd(20)} | ${cats.padEnd(15)} | ${payeeStr}${commentStr} | id: ${t.id}`;
 }
 
+/**
+ * ZenMoney keeps the newer version when an object changed on both sides,
+ * and the write response then carries the server's copy instead of ours.
+ * Returns a warning for the confirmation when the transaction now in state
+ * is not what we sent, so the tool does not report a change that was not
+ * kept.
+ */
+function serverVersionWarning(
+  state: ZenState,
+  sent: Transaction,
+  prefix = "\n\n"
+): string {
+  const held = state.findTransaction(sent.id);
+  if (!held) return `${prefix}Warning: the server's response deleted this transaction.`;
+  const diff = describeChanges(state, sent, held);
+  if (diff.length === 0) return "";
+  return `${prefix}Warning: the server kept a different version (${diff.join("; ")}).`;
+}
+
 function describeChanges(
   state: ZenState,
   before: Transaction,
@@ -940,6 +951,11 @@ function describeChanges(
   const catsAfter = tagTitles(state, after.tag);
   if (catsBefore !== catsAfter) {
     lines.push(`category: ${catsBefore} → ${catsAfter}`);
+  } else if ((before.tag ?? []).join() !== (after.tag ?? []).join()) {
+    // Two categories can share a title; tell them apart by id
+    lines.push(
+      `category: ${catsBefore} (${(before.tag ?? []).join(", ")}) → ${catsAfter} (${(after.tag ?? []).join(", ")})`
+    );
   }
 
   if (before.date !== after.date) {

@@ -7,8 +7,11 @@ import {
   type Instrument,
   type Transaction,
   type User,
+  type DiffRequest,
   type DiffResponse,
 } from "./api.js";
+
+type WriteChanges = Pick<DiffRequest, "transaction" | "deletion">;
 
 export class ZenState {
   private api: ZenMoneyAPI;
@@ -21,6 +24,7 @@ export class ZenState {
   transactions: Transaction[] = [];
   users: User[] = [];
   private synced = false;
+  private queue: Promise<unknown> = Promise.resolve();
 
   constructor(api: ZenMoneyAPI) {
     this.api = api;
@@ -31,31 +35,78 @@ export class ZenState {
   }
 
   async sync(forceFull = false): Promise<DiffResponse> {
-    const timestamp = forceFull ? 0 : this.serverTimestamp;
+    const resp = await this.serialize(async () => {
+      const timestamp = forceFull ? 0 : this.serverTimestamp;
 
-    const req: any = {
-      currentClientTimestamp: Math.floor(Date.now() / 1000),
-      serverTimestamp: timestamp,
-    };
+      const req: any = {
+        currentClientTimestamp: Math.floor(Date.now() / 1000),
+        serverTimestamp: timestamp,
+      };
 
-    if (timestamp === 0) {
-      req.forceFetch = [
-        "instrument",
-        "company",
-        "account",
-        "tag",
-        "merchant",
-        "transaction",
-        "user",
-      ];
-    }
+      if (timestamp === 0) {
+        req.forceFetch = [
+          "instrument",
+          "company",
+          "account",
+          "tag",
+          "merchant",
+          "transaction",
+          "user",
+        ];
+      }
 
-    const resp = await this.api.diff(req);
-    this.applyDiff(resp);
+      const resp = await this.api.diff(req);
+      this.applyDiff(resp);
+      return resp;
+    });
     this.synced = true;
     return resp;
   }
 
+  /**
+   * Send local changes and apply the server's response. `beforeApply` runs
+   * once the server has accepted the request and before the response is
+   * merged, so a version of the same object in the response wins.
+   *
+   * Pass `changes` as a function when they are derived from local state: it
+   * runs when this write's turn comes, after the exchanges queued before it
+   * have been applied. A throw from it rejects the write without sending.
+   */
+  write(
+    changes: WriteChanges | (() => WriteChanges),
+    beforeApply?: () => void
+  ): Promise<DiffResponse> {
+    return this.serialize(async () => {
+      const resp = await this.api.diff({
+        currentClientTimestamp: Math.floor(Date.now() / 1000),
+        serverTimestamp: this.serverTimestamp,
+        ...(typeof changes === "function" ? changes() : changes),
+      });
+      beforeApply?.();
+      this.applyDiff(resp);
+      return resp;
+    });
+  }
+
+  /**
+   * Run /v8/diff/ exchanges one at a time, in call order. Each request
+   * carries serverTimestamp and each response moves it; with two in flight
+   * (MCP clients do call tools in parallel) the older response could land
+   * last, move serverTimestamp back and overwrite newer data with older.
+   */
+  private serialize<T>(exchange: () => Promise<T>): Promise<T> {
+    const result = this.queue.then(exchange);
+    this.queue = result.catch(() => undefined);
+    return result;
+  }
+
+  /**
+   * Fold a /v8/diff/ response into local state. Writes go through this too:
+   * the response to a write carries everything that changed on the server
+   * since serverTimestamp (recomputed balances, edits from other devices),
+   * and moving serverTimestamp forward without applying it would hide those
+   * changes from every later incremental sync.
+   */
   private applyDiff(resp: DiffResponse): void {
     this.serverTimestamp = resp.serverTimestamp;
     this.mergeEntities("instruments", resp.instrument, (e) => e.id);

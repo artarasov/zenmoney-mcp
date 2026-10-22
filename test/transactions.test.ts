@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { Tag, ZenMoneyAPI } from "../src/api.js";
+import type { DiffResponse, Tag, ZenMoneyAPI } from "../src/api.js";
 import { ZenState } from "../src/state.js";
 import { registerTransactionTools } from "../src/tools/transactions.js";
 import {
@@ -38,12 +38,12 @@ async function setup(opts?: {
   state = new ZenState(api);
   if (opts?.synced !== false) {
     await state.sync();
-    // Reset mock so tool calls are tracked separately
+    // Reset mock so tool calls are tracked separately. A write is answered
+    // with what changed since the last sync, which here is nothing.
     vi.mocked(api.diff).mockClear();
-    vi.mocked(api.diff).mockResolvedValue({
-      ...diffResp,
-      serverTimestamp: diffResp.serverTimestamp + 1,
-    });
+    vi.mocked(api.diff).mockResolvedValue(
+      emptyDiff(diffResp.serverTimestamp + 1)
+    );
   }
 
   server = new McpServer({ name: "test", version: "1.0.0" });
@@ -53,6 +53,20 @@ async function setup(opts?: {
   const [ct, st] = InMemoryTransport.createLinkedPair();
   await server.connect(st);
   await client.connect(ct);
+}
+
+function emptyDiff(serverTimestamp: number) {
+  return makeDiffResponse({
+    serverTimestamp,
+    instrument: [],
+    company: [],
+    user: [],
+    account: [],
+    tag: [],
+    merchant: [],
+    transaction: [],
+    deletion: [],
+  });
 }
 
 async function callTool(name: string, args: Record<string, unknown>) {
@@ -1120,5 +1134,179 @@ describe("update_transaction", () => {
     expect(result.isError).toBe(true);
     expect(getTextContent(result)).toContain("network down");
     expect(state.findTransaction("tx-expense")!.tag).toEqual(["tag-food"]);
+  });
+});
+
+describe("applying the response to a write", () => {
+  // What the server sends back when another device changed things since our
+  // last sync: a recomputed balance and a transaction we have not seen.
+  function serverChanges(extra?: Partial<DiffResponse>) {
+    return {
+      ...emptyDiff(1700000100),
+      account: [{ ...CHECKING, balance: 777 }],
+      transaction: [
+        makeTransaction({ id: "tx-from-phone", outcome: 3, date: "2026-03-19" }),
+      ],
+      ...extra,
+    };
+  }
+
+  beforeEach(() =>
+    setup({
+      transactions: [makeTransaction({ id: "tx-existing", outcome: 50, date: "2026-03-20" })],
+    })
+  );
+
+  it.each([
+    ["add_expense", { account: "Checking", amount: 10, date: "2026-03-20" }],
+    ["add_income", { account: "Checking", amount: 10, date: "2026-03-20" }],
+    [
+      "add_transfer",
+      { from_account: "Checking", to_account: "Savings", amount: 10, date: "2026-03-20" },
+    ],
+    ["update_transaction", { id: "tx-existing", comment: "checked" }],
+  ])("%s should merge server changes into state", async (tool, args) => {
+    vi.mocked(api.diff).mockResolvedValueOnce(serverChanges());
+
+    const result = await callTool(tool, args);
+
+    expect(result.isError).toBeFalsy();
+    expect(state.serverTimestamp).toBe(1700000100);
+    expect(state.accounts.find((a) => a.id === "acc-checking")?.balance).toBe(777);
+    expect(state.findTransaction("tx-from-phone")).toBeDefined();
+  });
+
+  it("should apply deletions that come back with a write", async () => {
+    vi.mocked(api.diff).mockResolvedValueOnce(
+      serverChanges({
+        deletion: [{ id: "tx-existing", object: "transaction", stamp: 1, user: 1 }],
+      })
+    );
+
+    await callTool("add_expense", { account: "Checking", amount: 10, date: "2026-03-20" });
+
+    expect(state.findTransaction("tx-existing")).toBeUndefined();
+  });
+
+  it("should keep the server's version of the written transaction", async () => {
+    vi.mocked(api.diff).mockResolvedValueOnce(
+      serverChanges({
+        transaction: [
+          makeTransaction({ id: "tx-existing", outcome: 50, date: "2026-03-20", comment: "server copy" }),
+        ],
+      })
+    );
+
+    const result = await callTool("update_transaction", { id: "tx-existing", comment: "ours" });
+
+    expect(state.findTransaction("tx-existing")?.comment).toBe("server copy");
+    const text = getTextContent(result);
+    expect(text).toContain("comment: none → server copy");
+    expect(text).toContain("Warning: the server kept a different version (comment: ours → server copy)");
+  });
+
+  it("should warn when the server keeps a different version of a new transaction", async () => {
+    vi.mocked(api.diff).mockImplementationOnce(async (req) => {
+      const sent = req.transaction![0];
+      return serverChanges({ transaction: [{ ...sent, outcome: 12 }] });
+    });
+
+    const result = await callTool("add_expense", { account: "Checking", amount: 10, date: "2026-03-20" });
+
+    expect(getTextContent(result)).toContain("Warning: the server kept a different version (outcome: 10 USD → 12 USD)");
+  });
+
+  it("should tell apart two categories with the same title", async () => {
+    const FOOD_TOO: Tag = { ...FOOD, id: "tag-food-too" };
+    await setup({
+      tags: [FOOD, FOOD_TOO],
+      transactions: [
+        makeTransaction({ id: "tx-existing", outcome: 50, tag: ["tag-food"], date: "2026-03-20" }),
+      ],
+    });
+    vi.mocked(api.diff).mockImplementationOnce(async (req) =>
+      serverChanges({ transaction: [{ ...req.transaction![0], tag: ["tag-food"] }] })
+    );
+
+    const result = await callTool("update_transaction", { id: "tx-existing", category: "tag-food-too" });
+
+    expect(getTextContent(result)).toContain(
+      "Warning: the server kept a different version (category: Food (tag-food-too) → Food (tag-food))"
+    );
+  });
+
+  it("should not warn when the server echoes the write unchanged", async () => {
+    vi.mocked(api.diff).mockImplementationOnce(async (req) => serverChanges({ transaction: req.transaction }));
+
+    const result = await callTool("add_expense", { account: "Checking", amount: 10, date: "2026-03-20" });
+
+    expect(getTextContent(result)).not.toContain("Warning");
+  });
+
+  it("should keep a new transaction the response does not include", async () => {
+    vi.mocked(api.diff).mockResolvedValueOnce(serverChanges());
+
+    const result = await callTool("add_expense", {
+      account: "Checking",
+      amount: 10,
+      date: "2026-03-20",
+    });
+
+    const id = getTextContent(result).match(/ID: (\S+)/)![1];
+    expect(state.findTransaction(id)?.outcome).toBe(10);
+  });
+});
+
+describe("update_transaction queued behind another exchange", () => {
+  const EXPENSE = makeTransaction({ id: "tx-1", outcome: 50, date: "2026-03-20" });
+
+  // Holds the next /v8/diff/ exchange until released
+  function holdNextExchange() {
+    let release!: (resp: DiffResponse) => void;
+    vi.mocked(api.diff).mockImplementationOnce(
+      () => new Promise((resolve) => (release = resolve))
+    );
+    return (resp: DiffResponse) => release(resp);
+  }
+
+  // A tool call travels through the transport before its handler runs; give
+  // it time to validate against the current state and queue its write
+  const reachQueue = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+  beforeEach(() => setup({ transactions: [EXPENSE] }));
+
+  it("should keep both of two parallel edits to one transaction", async () => {
+    const releaseFirst = holdNextExchange();
+
+    const first = callTool("update_transaction", { id: "tx-1", comment: "checked" });
+    await vi.waitFor(() => expect(api.diff).toHaveBeenCalledTimes(1));
+    const second = callTool("update_transaction", { id: "tx-1", payee: "Cafe" });
+    await reachQueue();
+    releaseFirst(emptyDiff(1700000001));
+    await Promise.all([first, second]);
+
+    const sent = vi.mocked(api.diff).mock.calls[1][0].transaction![0];
+    expect(sent).toMatchObject({ comment: "checked", payee: "Cafe" });
+    expect(state.findTransaction("tx-1")).toMatchObject({ comment: "checked", payee: "Cafe" });
+  });
+
+  it("should not bring back a transaction deleted by the exchange before it", async () => {
+    const releaseSync = holdNextExchange();
+
+    const sync = state.sync();
+    await vi.waitFor(() => expect(api.diff).toHaveBeenCalledTimes(1));
+    const update = callTool("update_transaction", { id: "tx-1", comment: "checked" });
+    await reachQueue();
+    releaseSync({
+      ...emptyDiff(1700000001),
+      deletion: [{ id: "tx-1", object: "transaction", stamp: 1, user: 1 }],
+    });
+    await sync;
+    const result = await update;
+
+    expect(result.isError).toBe(true);
+    expect(getTextContent(result)).toContain("not found: tx-1");
+    expect(api.diff).toHaveBeenCalledTimes(1);
+    expect(state.findTransaction("tx-1")).toBeUndefined();
   });
 });

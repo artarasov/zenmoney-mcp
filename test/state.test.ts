@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { ZenState } from "../src/state.js";
-import type { ZenMoneyAPI } from "../src/api.js";
+import type { DiffResponse, ZenMoneyAPI } from "../src/api.js";
 import {
   makeDiffResponse,
   makeTransaction,
@@ -105,6 +105,60 @@ describe("ZenState", () => {
       // Should NOT have forceFetch on incremental sync
       const lastCall = vi.mocked(api.diff).mock.calls[1][0];
       expect(lastCall).not.toHaveProperty("forceFetch");
+    });
+  });
+
+  describe("concurrent exchanges", () => {
+    function changesSince(serverTimestamp: number, balance: number) {
+      return makeDiffResponse({
+        serverTimestamp,
+        instrument: [],
+        company: [],
+        user: [],
+        tag: [],
+        merchant: [],
+        account: [{ ...CHECKING, balance }],
+        transaction: [],
+        deletion: [],
+      });
+    }
+
+    it("should apply responses in call order even if they arrive out of order", async () => {
+      const api = createApi();
+      const state = new ZenState(api);
+      await state.sync();
+
+      let releaseFirst!: (resp: DiffResponse) => void;
+      vi.mocked(api.diff)
+        .mockImplementationOnce(() => new Promise((resolve) => (releaseFirst = resolve)))
+        .mockResolvedValueOnce(changesSince(1700000002, 222));
+
+      const first = state.sync();
+      const write = state.write({ transaction: [makeTransaction({ id: "tx-new", outcome: 1 })] });
+      // Give an unserialized second request every chance to go out and resolve first
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      releaseFirst(changesSince(1700000001, 111));
+      await Promise.all([first, write]);
+
+      const calls = vi.mocked(api.diff).mock.calls;
+      expect(calls[2][0].serverTimestamp).toBe(1700000001);
+      expect(state.serverTimestamp).toBe(1700000002);
+      expect(state.accounts.find((a) => a.id === "acc-checking")?.balance).toBe(222);
+    });
+
+    it("should keep going after a failed exchange", async () => {
+      const api = createApi();
+      const state = new ZenState(api);
+      await state.sync();
+
+      vi.mocked(api.diff)
+        .mockRejectedValueOnce(new Error("network down"))
+        .mockResolvedValueOnce(changesSince(1700000005, 5));
+
+      await expect(state.sync()).rejects.toThrow("network down");
+      await state.sync();
+
+      expect(state.serverTimestamp).toBe(1700000005);
     });
   });
 
