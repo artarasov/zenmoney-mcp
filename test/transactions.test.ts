@@ -616,6 +616,49 @@ describe("list_transactions", () => {
     expect(getTextContent(result)).toContain("id: tx-expense");
   });
 
+  it("should mark transactions on hold", async () => {
+    await setup({
+      transactions: [
+        makeTransaction({ id: "tx-held", outcome: 10, hold: true, date: "2026-03-20" }),
+        makeTransaction({ id: "tx-settled", outcome: 20, hold: false, date: "2026-03-20" }),
+      ],
+    });
+
+    const result = await callTool("list_transactions", { start_date: "2026-03-01", end_date: "2026-03-31" });
+    const lines = getTextContent(result).split("\n");
+    expect(lines.find((l) => l.includes("tx-held"))).toContain("[HOLD]");
+    expect(lines.find((l) => l.includes("tx-settled"))).not.toContain("[HOLD]");
+  });
+
+  it("should print creation time and bank ids with show_provenance", async () => {
+    await setup({
+      transactions: [
+        makeTransaction({
+          id: "tx-imported",
+          outcome: 10,
+          created: 1773964800,
+          outcomeBankID: "bank-op-42",
+          date: "2026-03-20",
+        }),
+      ],
+    });
+
+    const plain = getTextContent(
+      await callTool("list_transactions", { start_date: "2026-03-01", end_date: "2026-03-31" })
+    );
+    expect(plain).not.toContain("bank-op-42");
+
+    const text = getTextContent(
+      await callTool("list_transactions", {
+        start_date: "2026-03-01",
+        end_date: "2026-03-31",
+        show_provenance: true,
+      })
+    );
+    expect(text).toContain("created: 2026-03-20T00:00:00Z, outcome bankID: bank-op-42");
+    expect(text).not.toContain("income bankID");
+  });
+
   it("should show empty message when no transactions match", async () => {
     await setup({ transactions: [] });
     const result = await callTool("list_transactions", { start_date: "2026-03-01", end_date: "2026-03-31" });

@@ -459,8 +459,15 @@ export function registerTransactionTools(
         .optional()
         .default(50)
         .describe("Max number of transactions to return (default 50)"),
+      show_provenance: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "Add a line under each transaction with when it was created and the bank import ids (bankID). Useful to tell a bank import that came in twice from two real operations."
+        ),
     },
-    async ({ days, start_date, end_date, account, category, limit }) => {
+    async ({ days, start_date, end_date, account, category, limit, show_provenance }) => {
       if (!state.isSynced) {
         return {
           content: [
@@ -522,7 +529,11 @@ export function registerTransactionTools(
       filtered.sort((a, b) => (b.date > a.date ? 1 : -1));
       filtered = filtered.slice(0, limit);
 
-      const lines = filtered.map((t) => formatTransactionLine(state, t));
+      const lines = filtered.map((t) =>
+        show_provenance
+          ? `${formatTransactionLine(state, t)}\n    ${formatProvenance(t)}`
+          : formatTransactionLine(state, t)
+      );
 
       return {
         content: [
@@ -925,8 +936,18 @@ function formatTransactionLine(state: ZenState, t: Transaction): string {
     : "";
   const payeeStr = t.payee ?? "";
   const commentStr = t.comment ? ` — "${t.comment}"` : "";
+  // A hold is a card authorization the bank has not settled yet
+  const holdStr = t.hold ? " [HOLD]" : "";
 
-  return `${t.date} | ${type.padEnd(8)} | ${amountStr.padEnd(20)} | ${cats.padEnd(15)} | ${payeeStr}${commentStr} | id: ${t.id}`;
+  return `${t.date} | ${type.padEnd(8)} | ${amountStr.padEnd(20)} | ${cats.padEnd(15)} | ${payeeStr}${commentStr}${holdStr} | id: ${t.id}`;
+}
+
+function formatProvenance(t: Transaction): string {
+  const created = new Date(t.created * 1000).toISOString().replace(".000Z", "Z");
+  const parts = [`created: ${created}`];
+  if (t.outcomeBankID) parts.push(`outcome bankID: ${t.outcomeBankID}`);
+  if (t.incomeBankID) parts.push(`income bankID: ${t.incomeBankID}`);
+  return parts.join(", ");
 }
 
 function describeChanges(
