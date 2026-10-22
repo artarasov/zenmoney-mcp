@@ -401,9 +401,10 @@ export function registerTransactionTools(
 
         const fromInstr = state.getInstrument(outcomeInstrument);
         const toInstr = state.getInstrument(incomeInstrument);
-        const amountLine = isCrossCurrency
-          ? `- From amount: ${resolvedOutcome} ${fromInstr?.shortTitle ?? ""}\n- To amount: ${resolvedIncome} ${toInstr?.shortTitle ?? ""}`
-          : `- Amount: ${resolvedOutcome} ${fromInstr?.shortTitle ?? ""}`;
+        const amountLine =
+          isCrossCurrency || resolvedIncome !== resolvedOutcome
+            ? `- From amount: ${resolvedOutcome} ${fromInstr?.shortTitle ?? ""}\n- To amount: ${resolvedIncome} ${toInstr?.shortTitle ?? ""}`
+            : `- Amount: ${resolvedOutcome} ${fromInstr?.shortTitle ?? ""}`;
 
         return {
           content: [
@@ -907,7 +908,7 @@ function formatTransactionLine(state: ZenState, t: Transaction): string {
     const from = accountTitle(state, t.outcomeAccount);
     const to = accountTitle(state, t.incomeAccount);
     type = "transfer";
-    if (t.outcomeInstrument !== t.incomeInstrument) {
+    if (t.outcomeInstrument !== t.incomeInstrument || t.outcome !== t.income) {
       amountStr = `${t.outcome} ${currencyOf(state, t.outcomeInstrument)} → ${t.income} ${currencyOf(state, t.incomeInstrument)} (${from} → ${to})`;
     } else {
       amountStr = `${t.outcome} (${from} → ${to})`;

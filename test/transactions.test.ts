@@ -360,6 +360,20 @@ describe("add_transfer", () => {
     expect(getTextContent(result)).toContain("outcome_amount");
   });
 
+  it("should confirm both amounts when a same-currency transfer loses a fee", async () => {
+    const result = await callTool("add_transfer", {
+      from_account: "Checking",
+      to_account: "Savings",
+      outcome_amount: 100,
+      income_amount: 90,
+      date: "2026-03-20",
+    });
+
+    const text = getTextContent(result);
+    expect(text).toContain("From amount: 100 USD");
+    expect(text).toContain("To amount: 90 USD");
+  });
+
   it("should attach comment", async () => {
     await callTool("add_transfer", {
       from_account: "Checking",
@@ -487,6 +501,27 @@ describe("list_transactions", () => {
     expect(text).toContain("transfer");
     expect(text).toContain("Checking");
     expect(text).toContain("Savings");
+  });
+
+  it("should show both amounts of a same-currency transfer when they differ", async () => {
+    await setup({
+      transactions: [
+        makeTransaction({
+          id: "tx-fee",
+          outcome: 100,
+          income: 90,
+          outcomeAccount: "acc-checking",
+          incomeAccount: "acc-savings",
+          outcomeInstrument: 1,
+          incomeInstrument: 1,
+          date: "2026-03-15",
+        }),
+      ],
+    });
+
+    const result = await callTool("list_transactions", { start_date: "2026-03-01", end_date: "2026-03-31" });
+    const text = getTextContent(result);
+    expect(text).toContain("100 USD → 90 USD");
   });
 
   it("should display cross-currency transfers with both currencies", async () => {
