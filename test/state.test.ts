@@ -89,6 +89,49 @@ describe("ZenState", () => {
       );
     });
 
+    it("should replace state on forceFull instead of merging into it", async () => {
+      const api = createApi(
+        makeDiffResponse({
+          transaction: [makeTransaction({ id: "tx-gone", outcome: 5 })],
+        })
+      );
+      const state = new ZenState(api);
+      await state.sync();
+      expect(state.transactions).toHaveLength(1);
+
+      // The full snapshot no longer has the savings account or the transaction
+      vi.mocked(api.diff).mockResolvedValue(
+        makeDiffResponse({
+          serverTimestamp: 1700000001,
+          account: [CHECKING, EURO_CARD, ARCHIVED_ACCOUNT],
+          transaction: [],
+        })
+      );
+      await state.sync(true);
+
+      expect(state.transactions).toHaveLength(0);
+      expect(state.accounts.map((a) => a.id)).not.toContain("acc-savings");
+      expect(state.serverTimestamp).toBe(1700000001);
+    });
+
+    it("should keep existing state when a forceFull sync fails", async () => {
+      const api = createApi(
+        makeDiffResponse({
+          transaction: [makeTransaction({ id: "tx-kept", outcome: 5 })],
+        })
+      );
+      const state = new ZenState(api);
+      await state.sync();
+
+      vi.mocked(api.diff).mockRejectedValue(new Error("network down"));
+      await expect(state.sync(true)).rejects.toThrow("network down");
+
+      expect(state.isSynced).toBe(true);
+      expect(state.transactions.map((t) => t.id)).toEqual(["tx-kept"]);
+      expect(state.accounts).toHaveLength(4);
+      expect(state.serverTimestamp).toBe(1700000000);
+    });
+
     it("should do incremental sync on subsequent calls", async () => {
       const api = createApi();
       const state = new ZenState(api);
