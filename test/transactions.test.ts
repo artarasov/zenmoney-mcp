@@ -616,6 +616,27 @@ describe("list_transactions", () => {
     expect(getTextContent(result)).toContain("id: tx-expense");
   });
 
+  it("should list deleted transactions only with show_deleted", async () => {
+    await setup({
+      transactions: [
+        makeTransaction({ id: "tx-live", outcome: 10, date: "2026-03-20" }),
+        makeTransaction({ id: "tx-removed", outcome: 20, deleted: true, date: "2026-03-20" }),
+      ],
+    });
+    const range = { start_date: "2026-03-01", end_date: "2026-03-31" };
+
+    const plain = getTextContent(await callTool("list_transactions", range));
+    expect(plain).toContain("tx-live");
+    expect(plain).not.toContain("tx-removed");
+
+    const text = getTextContent(
+      await callTool("list_transactions", { ...range, show_deleted: true })
+    );
+    const lines = text.split("\n");
+    expect(lines.find((l) => l.includes("tx-removed"))).toContain("[DELETED]");
+    expect(lines.find((l) => l.includes("tx-live"))).not.toContain("[DELETED]");
+  });
+
   it("should show empty message when no transactions match", async () => {
     await setup({ transactions: [] });
     const result = await callTool("list_transactions", { start_date: "2026-03-01", end_date: "2026-03-31" });

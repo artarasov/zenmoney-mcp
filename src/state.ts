@@ -20,6 +20,12 @@ export class ZenState {
   instruments: Instrument[] = [];
   transactions: Transaction[] = [];
   users: User[] = [];
+  /**
+   * Transactions the server reports as deleted. Kept apart from
+   * `transactions`, which only ever holds live ones, so that a listing can
+   * show them on request when reconciling a balance or an import.
+   */
+  private deletedTransactions = new Map<string, Transaction>();
   private synced = false;
 
   constructor(api: ZenMoneyAPI) {
@@ -101,8 +107,10 @@ export class ZenState {
     for (const t of incoming) {
       if (t.deleted) {
         map.delete(t.id);
+        this.deletedTransactions.set(t.id, t);
       } else {
         map.set(t.id, t);
+        this.deletedTransactions.delete(t.id);
       }
     }
     this.transactions = Array.from(map.values());
@@ -110,9 +118,12 @@ export class ZenState {
 
   private applyDeletion(objectType: string, id: string): void {
     switch (objectType) {
-      case "transaction":
+      case "transaction": {
+        const gone = this.transactions.find((t) => t.id === id);
+        if (gone) this.deletedTransactions.set(id, { ...gone, deleted: true });
         this.transactions = this.transactions.filter((t) => t.id !== id);
         break;
+      }
       case "account":
         this.accounts = this.accounts.filter((a) => a.id !== id);
         break;
@@ -123,6 +134,10 @@ export class ZenState {
         this.merchants = this.merchants.filter((m) => m.id !== id);
         break;
     }
+  }
+
+  getDeletedTransactions(): Transaction[] {
+    return Array.from(this.deletedTransactions.values());
   }
 
   getActiveAccounts(): Account[] {

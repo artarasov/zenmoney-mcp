@@ -459,8 +459,15 @@ export function registerTransactionTools(
         .optional()
         .default(50)
         .describe("Max number of transactions to return (default 50)"),
+      show_deleted: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "Also list transactions deleted on the server, marked [DELETED]. Useful when a balance does not add up or to check whether a duplicate was already removed."
+        ),
     },
-    async ({ days, start_date, end_date, account, category, limit }) => {
+    async ({ days, start_date, end_date, account, category, limit, show_deleted }) => {
       if (!state.isSynced) {
         return {
           content: [
@@ -497,7 +504,11 @@ export function registerTransactionTools(
         upperBound = null;
       }
 
-      let filtered = state.transactions.filter(
+      const pool = show_deleted
+        ? [...state.transactions, ...state.getDeletedTransactions()]
+        : state.transactions;
+
+      let filtered = pool.filter(
         (t) => t.date >= lowerBound && (upperBound === null || t.date <= upperBound)
       );
 
@@ -925,8 +936,9 @@ function formatTransactionLine(state: ZenState, t: Transaction): string {
     : "";
   const payeeStr = t.payee ?? "";
   const commentStr = t.comment ? ` — "${t.comment}"` : "";
+  const deletedStr = t.deleted ? " [DELETED]" : "";
 
-  return `${t.date} | ${type.padEnd(8)} | ${amountStr.padEnd(20)} | ${cats.padEnd(15)} | ${payeeStr}${commentStr} | id: ${t.id}`;
+  return `${t.date} | ${type.padEnd(8)} | ${amountStr.padEnd(20)} | ${cats.padEnd(15)} | ${payeeStr}${commentStr}${deletedStr} | id: ${t.id}`;
 }
 
 function describeChanges(

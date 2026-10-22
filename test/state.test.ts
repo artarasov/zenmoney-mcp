@@ -225,6 +225,45 @@ describe("ZenState", () => {
     });
   });
 
+  describe("deleted transactions", () => {
+    it("should keep transactions the server marks deleted apart from live ones", async () => {
+      const api = createApi(
+        makeDiffResponse({
+          transaction: [
+            makeTransaction({ id: "tx-live", outcome: 1 }),
+            makeTransaction({ id: "tx-dead", outcome: 2, deleted: true }),
+          ],
+        })
+      );
+      const state = new ZenState(api);
+      await state.sync();
+
+      expect(state.transactions.map((t) => t.id)).toEqual(["tx-live"]);
+      expect(state.getDeletedTransactions().map((t) => t.id)).toEqual(["tx-dead"]);
+    });
+
+    it("should record a transaction removed through a deletion entry", async () => {
+      const api = createApi(
+        makeDiffResponse({ transaction: [makeTransaction({ id: "tx-1", outcome: 1 })] })
+      );
+      const state = new ZenState(api);
+      await state.sync();
+
+      vi.mocked(api.diff).mockResolvedValue(
+        makeDiffResponse({
+          serverTimestamp: 1700000001,
+          deletion: [{ id: "tx-1", object: "transaction", stamp: 1, user: 1 }],
+        })
+      );
+      await state.sync();
+
+      expect(state.transactions).toHaveLength(0);
+      expect(state.getDeletedTransactions()).toEqual([
+        expect.objectContaining({ id: "tx-1", deleted: true }),
+      ]);
+    });
+  });
+
   describe("deletion", () => {
     it("should apply deletions from diff response", async () => {
       const api = createApi(
