@@ -56,7 +56,14 @@ export class ZenState {
     return resp;
   }
 
-  private applyDiff(resp: DiffResponse): void {
+  /**
+   * Fold a /v8/diff/ response into local state. Write tools call this too:
+   * the response to a write carries everything that changed on the server
+   * since serverTimestamp (recomputed balances, edits from other devices),
+   * and moving serverTimestamp forward without applying it would hide those
+   * changes from every later incremental sync.
+   */
+  applyDiff(resp: DiffResponse): void {
     this.serverTimestamp = resp.serverTimestamp;
     this.mergeEntities("instruments", resp.instrument, (e) => e.id);
     this.mergeEntities("accounts", resp.account, (e) => e.id);

@@ -107,8 +107,9 @@ export function registerTransactionTools(
           transaction: [transaction],
         });
 
-        state.serverTimestamp = resp.serverTimestamp;
-        state.transactions.push(transaction);
+        // Our copy first, then the response, so the server's version wins
+        state.upsertTransaction(transaction);
+        state.applyDiff(resp);
 
         const instr = state.getInstrument(instrumentId);
         const currency = instr?.shortTitle ?? "";
@@ -122,7 +123,7 @@ export function registerTransactionTools(
           content: [
             {
               type: "text" as const,
-              text: `Expense added:\n- Amount: ${amount} ${currency}\n- Account: ${acc.title}\n- Date: ${date}\n- Category: ${catName}${payee ? `\n- Payee: ${payee}` : ""}${comment ? `\n- Comment: ${comment}` : ""}\n- ID: ${transaction.id}`,
+              text: `Expense added:\n- Amount: ${amount} ${currency}\n- Account: ${acc.title}\n- Date: ${date}\n- Category: ${catName}${payee ? `\n- Payee: ${payee}` : ""}${comment ? `\n- Comment: ${comment}` : ""}\n- ID: ${transaction.id}${serverVersionWarning(state, transaction)}`,
             },
           ],
         };
@@ -231,8 +232,9 @@ export function registerTransactionTools(
           transaction: [transaction],
         });
 
-        state.serverTimestamp = resp.serverTimestamp;
-        state.transactions.push(transaction);
+        // Our copy first, then the response, so the server's version wins
+        state.upsertTransaction(transaction);
+        state.applyDiff(resp);
 
         const instr = state.getInstrument(instrumentId);
         const currency = instr?.shortTitle ?? "";
@@ -241,7 +243,7 @@ export function registerTransactionTools(
           content: [
             {
               type: "text" as const,
-              text: `Income added:\n- Amount: ${amount} ${currency}\n- Account: ${acc.title}\n- Date: ${date}\n- ID: ${transaction.id}`,
+              text: `Income added:\n- Amount: ${amount} ${currency}\n- Account: ${acc.title}\n- Date: ${date}\n- ID: ${transaction.id}${serverVersionWarning(state, transaction)}`,
             },
           ],
         };
@@ -396,8 +398,9 @@ export function registerTransactionTools(
           transaction: [transaction],
         });
 
-        state.serverTimestamp = resp.serverTimestamp;
-        state.transactions.push(transaction);
+        // Our copy first, then the response, so the server's version wins
+        state.upsertTransaction(transaction);
+        state.applyDiff(resp);
 
         const fromInstr = state.getInstrument(outcomeInstrument);
         const toInstr = state.getInstrument(incomeInstrument);
@@ -409,7 +412,7 @@ export function registerTransactionTools(
           content: [
             {
               type: "text" as const,
-              text: `Transfer added:\n- From: ${fromAcc.title}\n- To: ${toAcc.title}\n${amountLine}\n- Date: ${date}\n- ID: ${transaction.id}`,
+              text: `Transfer added:\n- From: ${fromAcc.title}\n- To: ${toAcc.title}\n${amountLine}\n- Date: ${date}\n- ID: ${transaction.id}${serverVersionWarning(state, transaction)}`,
             },
           ],
         };
@@ -793,16 +796,17 @@ export function registerTransactionTools(
           transaction: updates,
         });
 
-        state.serverTimestamp = resp.serverTimestamp;
         for (const next of updates) state.upsertTransaction(next);
+        state.applyDiff(resp);
 
         const blocks = updates.map((next, i) => {
-          const changes = describeChanges(state, originals[i], next);
+          const held = state.findTransaction(next.id) ?? next;
+          const changes = describeChanges(state, originals[i], held);
           const detail =
             changes.length > 0
               ? changes.map((c) => `    ${c}`).join("\n")
               : "    (no field actually changed)";
-          return `- ${formatTransactionLine(state, next)}\n${detail}`;
+          return `- ${formatTransactionLine(state, held)}\n${detail}${serverVersionWarning(state, next, "\n    ")}`;
         });
 
         return {
@@ -929,6 +933,25 @@ function formatTransactionLine(state: ZenState, t: Transaction): string {
   return `${t.date} | ${type.padEnd(8)} | ${amountStr.padEnd(20)} | ${cats.padEnd(15)} | ${payeeStr}${commentStr} | id: ${t.id}`;
 }
 
+/**
+ * ZenMoney keeps the newer version when an object changed on both sides,
+ * and the write response then carries the server's copy instead of ours.
+ * Returns a warning for the confirmation when the transaction now in state
+ * is not what we sent, so the tool does not report a change that was not
+ * kept.
+ */
+function serverVersionWarning(
+  state: ZenState,
+  sent: Transaction,
+  prefix = "\n\n"
+): string {
+  const held = state.findTransaction(sent.id);
+  if (!held) return `${prefix}Warning: the server's response deleted this transaction.`;
+  const diff = describeChanges(state, sent, held);
+  if (diff.length === 0) return "";
+  return `${prefix}Warning: the server kept a different version (${diff.join("; ")}).`;
+}
+
 function describeChanges(
   state: ZenState,
   before: Transaction,
@@ -940,6 +963,11 @@ function describeChanges(
   const catsAfter = tagTitles(state, after.tag);
   if (catsBefore !== catsAfter) {
     lines.push(`category: ${catsBefore} → ${catsAfter}`);
+  } else if ((before.tag ?? []).join() !== (after.tag ?? []).join()) {
+    // Two categories can share a title; tell them apart by id
+    lines.push(
+      `category: ${catsBefore} (${(before.tag ?? []).join(", ")}) → ${catsAfter} (${(after.tag ?? []).join(", ")})`
+    );
   }
 
   if (before.date !== after.date) {
