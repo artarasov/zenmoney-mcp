@@ -1122,3 +1122,42 @@ describe("update_transaction", () => {
     expect(state.findTransaction("tx-expense")!.tag).toEqual(["tag-food"]);
   });
 });
+
+describe("date validation", () => {
+  const EXPENSE = makeTransaction({ id: "tx-expense", outcome: 50, date: "2026-03-20" });
+
+  beforeEach(() => setup({ transactions: [EXPENSE] }));
+
+  it.each([
+    ["add_expense", "date", { account: "Checking", amount: 10 }],
+    ["add_income", "date", { account: "Checking", amount: 10 }],
+    ["add_transfer", "date", { from_account: "Checking", to_account: "Savings", amount: 10 }],
+    ["update_transaction", "date", { id: "tx-expense" }],
+    ["list_transactions", "start_date", {}],
+    ["list_transactions", "end_date", {}],
+  ])("%s should reject an invalid %s", async (tool, field, args) => {
+    for (const value of ["20.03.2026", "2026-3-20", "yesterday", "2026-02-30", "2026-13-01"]) {
+      const result = await callTool(tool, { ...args, [field]: value });
+      expect(result.isError, `${field}=${value}`).toBe(true);
+    }
+    expect(api.diff).not.toHaveBeenCalled();
+  });
+
+  it("should accept a start date early enough to mean everything", async () => {
+    const result = await callTool("list_transactions", {
+      start_date: "0001-01-01",
+      end_date: "2026-03-31",
+    });
+    expect(result.isError).toBeFalsy();
+    expect(getTextContent(result)).toContain("tx-expense");
+  });
+
+  it("should accept February 29 in a leap year", async () => {
+    const result = await callTool("add_expense", {
+      account: "Checking",
+      amount: 10,
+      date: "2028-02-29",
+    });
+    expect(result.isError).toBeFalsy();
+  });
+});

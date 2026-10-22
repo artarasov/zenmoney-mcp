@@ -4,6 +4,27 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Account, Tag, Transaction, ZenMoneyAPI } from "../api.js";
 import type { ZenState } from "../state.js";
 
+/**
+ * A YYYY-MM-DD string that is also a real calendar day. The format check
+ * alone lets 2026-02-30 through to the API.
+ */
+const isoDate = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "Date must be in YYYY-MM-DD format")
+  .refine(isCalendarDate, "Date must be a real calendar day");
+
+function isCalendarDate(value: string): boolean {
+  const [year, month, day] = value.split("-").map(Number);
+  // setUTCFullYear, unlike Date.UTC, does not map years 0-99 to 1900-1999
+  const date = new Date(0);
+  date.setUTCFullYear(year, month - 1, day);
+  return (
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
+  );
+}
+
 export function registerTransactionTools(
   server: McpServer,
   api: ZenMoneyAPI,
@@ -17,9 +38,7 @@ export function registerTransactionTools(
         .string()
         .describe("Account name or UUID to deduct from"),
       amount: z.number().positive().describe("Expense amount (positive number)"),
-      date: z
-        .string()
-        .describe("Transaction date in YYYY-MM-DD format"),
+      date: isoDate.describe("Transaction date in YYYY-MM-DD format"),
       category: z
         .string()
         .optional()
@@ -146,7 +165,7 @@ export function registerTransactionTools(
     {
       account: z.string().describe("Account name or UUID to credit"),
       amount: z.number().positive().describe("Income amount (positive number)"),
-      date: z.string().describe("Transaction date in YYYY-MM-DD format"),
+      date: isoDate.describe("Transaction date in YYYY-MM-DD format"),
       category: z.string().optional().describe("Category name or UUID"),
       payee: z.string().optional().describe("Payer name"),
       comment: z.string().optional().describe("Transaction comment"),
@@ -268,7 +287,7 @@ export function registerTransactionTools(
       amount: z.number().positive().optional().describe("Transfer amount (alias for outcome_amount, for same-currency transfers)"),
       outcome_amount: z.number().positive().optional().describe("Amount debited from source account (in source account currency)"),
       income_amount: z.number().positive().optional().describe("Amount credited to destination account (in destination account currency). Required for cross-currency transfers."),
-      date: z.string().describe("Transaction date in YYYY-MM-DD format"),
+      date: isoDate.describe("Transaction date in YYYY-MM-DD format"),
       comment: z.string().optional().describe("Transfer comment"),
     },
     async ({ from_account, to_account, amount, outcome_amount, income_amount, date, comment }) => {
@@ -436,14 +455,10 @@ export function registerTransactionTools(
         .optional()
         .default(30)
         .describe("Number of days to look back from today (default 30). Ignored if start_date or end_date is provided."),
-      start_date: z
-        .string()
-        .regex(/^\d{4}-\d{2}-\d{2}$/, "Date must be in YYYY-MM-DD format")
+      start_date: isoDate
         .optional()
         .describe("Start of date range (inclusive), YYYY-MM-DD. If omitted while end_date is set, defaults to unbounded."),
-      end_date: z
-        .string()
-        .regex(/^\d{4}-\d{2}-\d{2}$/, "Date must be in YYYY-MM-DD format")
+      end_date: isoDate
         .optional()
         .describe("End of date range (inclusive), YYYY-MM-DD. If omitted while start_date is set, defaults to today."),
       account: z
@@ -568,9 +583,7 @@ export function registerTransactionTools(
         .nonnegative()
         .optional()
         .describe("New amount credited to the destination account"),
-      date: z
-        .string()
-        .regex(/^\d{4}-\d{2}-\d{2}$/, "Date must be in YYYY-MM-DD format")
+      date: isoDate
         .optional()
         .describe("New transaction date in YYYY-MM-DD format"),
       payee: z
