@@ -600,7 +600,54 @@ describe("list_transactions", () => {
       limit: 3,
     });
     const text = getTextContent(result);
-    expect(text).toContain("Transactions (3)");
+    expect(text).toContain("Transactions (3 of 10, raise limit to see the rest)");
+  });
+
+  it("should reject a limit that is not a positive integer", async () => {
+    await setup({ transactions: [makeTransaction({ id: "tx-1", outcome: 10, date: "2026-03-20" })] });
+
+    for (const limit of [0, -1, 2.5]) {
+      const result = await callTool("list_transactions", {
+        start_date: "2026-03-01",
+        end_date: "2026-03-31",
+        limit,
+      });
+      expect(result.isError).toBe(true);
+    }
+  });
+
+  it("should order by date, then by creation time, newest first", async () => {
+    const txs = [
+      makeTransaction({ id: "tx-early", outcome: 1, date: "2026-03-20", created: 1000 }),
+      makeTransaction({ id: "tx-older-day", outcome: 2, date: "2026-03-19", created: 3000 }),
+      makeTransaction({ id: "tx-late", outcome: 3, date: "2026-03-20", created: 2000 }),
+      makeTransaction({ id: "tx-mid", outcome: 4, date: "2026-03-20", created: 1500 }),
+    ];
+    await setup({ transactions: txs });
+
+    const result = await callTool("list_transactions", {
+      start_date: "2026-03-01",
+      end_date: "2026-03-31",
+    });
+    const ids = [...getTextContent(result).matchAll(/id: (\S+)/g)].map((m) => m[1]);
+    expect(ids).toEqual(["tx-late", "tx-mid", "tx-early", "tx-older-day"]);
+  });
+
+  it("should not depend on sync order when date and creation time are equal", async () => {
+    const twin = (id: string) =>
+      makeTransaction({ id, outcome: 1, date: "2026-03-20", created: 1000 });
+    const listed = async (txs: ReturnType<typeof makeTransaction>[]) => {
+      await setup({ transactions: txs });
+      const result = await callTool("list_transactions", {
+        start_date: "2026-03-01",
+        end_date: "2026-03-31",
+        limit: 1,
+      });
+      return [...getTextContent(result).matchAll(/id: (\S+)/g)].map((m) => m[1]);
+    };
+
+    expect(await listed([twin("tx-b"), twin("tx-a")])).toEqual(["tx-a"]);
+    expect(await listed([twin("tx-a"), twin("tx-b")])).toEqual(["tx-a"]);
   });
 
   it("should print transaction ids so they can be updated", async () => {
